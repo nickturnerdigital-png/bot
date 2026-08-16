@@ -5,66 +5,35 @@ stops with a time window as you line them up, hit **Build Route**, and get a
 time-window-aware visiting order with realistic drive times and a one-tap
 Google Maps handoff for navigation.
 
-## ⚠️ Before you start: this requires a billed Google Cloud project
+## No API key required
 
-This app calls the Google Maps Platform APIs for geocoding and drive times.
-Those APIs require a Google Cloud project **with billing enabled** — Google
-Maps Platform has a monthly free usage credit, but a live API key will not
-work at all without a billing account attached, even if you stay under the
-free tier.
+This app runs entirely on free, keyless services:
 
-### 1. Create/select a Google Cloud project
+- **Geocoding**: [Nominatim](https://nominatim.org/) (OpenStreetMap) — turns
+  addresses into coordinates.
+- **Driving distance/duration**: [OSRM](https://project-osrm.org/) (Open
+  Source Routing Machine) — real road-network drive times and distances
+  between every pair of stops, not straight-line estimates.
+- **Map preview**: [Leaflet](https://leafletjs.com/) + OpenStreetMap tiles.
+- **Navigation handoff**: a plain `https://www.google.com/maps/dir/?...` URL
+  deep link that opens turn-by-turn navigation in the Google Maps app — this
+  is just a link, not an API call, so it needs no key either. A best-effort
+  Apple Maps link is included too.
 
-Go to [console.cloud.google.com](https://console.cloud.google.com/), create a
-project (or pick an existing one), and enable billing on it under
-**Billing**.
+Both defaults point at the public Nominatim and OSRM servers, which is fine
+to get started, but **both explicitly say in their own usage policies that
+the public instances are for light/demo use, not production traffic**:
 
-### 2. Enable these APIs
+- Nominatim: max 1 request/second, and requires an identifying User-Agent
+  (this app throttles to that automatically, but set `NOMINATIM_USER_AGENT`
+  to your own app name + contact info — see `.env.example`).
+- OSRM's public demo server: no uptime or rate guarantees, and asks that
+  heavier usage be self-hosted instead.
 
-In **APIs & Services → Library**, enable:
-
-- **Geocoding API** — turns addresses into lat/lng.
-- **Distance Matrix API** — real drive time + distance between every pair of
-  stops (this is what makes the route time-window-aware instead of a
-  straight-line guess).
-- **Maps JavaScript API** — only needed if you want the visual map preview
-  (optional; the core add-stops/build-route/navigate loop works without it).
-
-### 3. Create two API keys with separate restrictions
-
-Create these under **APIs & Services → Credentials → Create credentials → API key**.
-Keeping them separate limits the blast radius if either one leaks.
-
-**Server key** (`GOOGLE_MAPS_SERVER_KEY`) — used only inside this app's API
-routes, never sent to the browser:
-- API restrictions: Geocoding API, Distance Matrix API.
-- Application restrictions: **IP addresses**, restricted to your server's/
-  hosting provider's IP(s) if you know them ahead of time (e.g. a static
-  Vercel IP range or your own server). If you can't pin an IP yet, leave this
-  open initially and lock it down once deployed — never leave a key
-  completely unrestricted long-term.
-
-**Browser key** (`NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY`, optional) — used
-client-side to render the map preview:
-- API restrictions: Maps JavaScript API only.
-- Application restrictions: **HTTP referrers**, restricted to your domain(s)
-  (e.g. `https://yourapp.vercel.app/*`, `http://localhost:3000/*` for local
-  dev).
-
-### 4. Set environment variables
-
-```bash
-cp .env.example .env.local
-```
-
-Fill in:
-
-```
-GOOGLE_MAPS_SERVER_KEY=your-server-key
-NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY=your-browser-key   # optional, map view only
-```
-
-`.env.local` is gitignored — never commit real keys.
+If you outgrow the public servers — using this daily for real sourcing runs
+will likely get there — self-host Nominatim and/or OSRM (both are
+open-source and dockerized; see their docs) and point `NOMINATIM_BASE_URL` /
+`OSRM_BASE_URL` at your own instance. No code changes needed.
 
 ## Running locally
 
@@ -76,15 +45,19 @@ npm run dev
 Open http://localhost:3000. It's built mobile-first — use your browser's
 device toolbar (or just open it on your phone) to see it as intended.
 
+Optionally copy `.env.example` to `.env.local` and set `NOMINATIM_USER_AGENT`
+(and `NOMINATIM_BASE_URL` / `OSRM_BASE_URL` if self-hosting) — everything
+else works out of the box with no configuration.
+
 ## How it works
 
 1. **Add a stop**: address, optional item/contact label, earliest/latest
    time, and how long you expect to be there (default 10 min). The address is
-   geocoded immediately via `/api/geocode` and cached on the stop, so
-   rebuilding the route later doesn't re-geocode anything.
+   geocoded immediately via `/api/geocode` (Nominatim) and cached on the
+   stop, so rebuilding the route later doesn't re-geocode anything.
 2. **Build Route**: `/api/build-route` fetches a real drive-time/distance
-   matrix between your start location and every stop (Distance Matrix API,
-   traffic-aware), then runs the ordering algorithm in `src/lib/routing.ts`.
+   matrix between your start location and every stop in one request (OSRM's
+   Table service), then runs the ordering algorithm in `src/lib/routing.ts`.
 3. **Ordering algorithm** (`src/lib/routing.ts`, unit-tested in
    `routing.test.ts`): this is **not** a shortest-distance TSP solver. It
    seeds a candidate order two ways — nearest-neighbor-by-drive-time and
@@ -95,6 +68,9 @@ device toolbar (or just open it on your phone) to see it as intended.
    drive if that's what it takes to hit more pickup windows.
 4. Each stop is flagged **on time**, **tight** (≤10 min buffer before the
    window closes), or **will miss**, based on the simulated arrival time.
+   Note: OSRM's drive times reflect typical road speeds from the map data,
+   not live traffic — build times a little slack into windows if traffic is
+   a wildcard for your route.
 5. **Navigate**: the ordered stops become a Google Maps multi-stop
    directions URL (`src/lib/mapsUrl.ts`). Google Maps' own app UI caps a
    single multi-stop route at 10 points (origin + 9 stops), so routes longer
@@ -108,8 +84,9 @@ device toolbar (or just open it on your phone) to see it as intended.
    as new pickups come in.
 
 Stops and the last built route are persisted to the browser's `localStorage`
-(single-user, no backend database needed). The two API routes exist purely
-to keep the Google Maps server key off the client.
+(single-user, no backend database needed). The two API routes exist so
+geocoding/routing requests come from the server, not the browser, and so
+Nominatim's 1-req/sec throttling is enforced in one place.
 
 ## Testing
 
@@ -118,12 +95,10 @@ npm test
 ```
 
 Unit tests cover the routing algorithm's simulation and ordering logic
-directly against synthetic distance matrices — no network calls, no API key
-needed.
+directly against synthetic distance matrices — no network calls needed.
 
 ## Deploying
 
-Any Next.js host works (Vercel, etc.). Set `GOOGLE_MAPS_SERVER_KEY` (and
-optionally `NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY`) as environment variables on
-the hosting platform, then update your key restrictions (IP for the server
-key, HTTP referrer for the browser key) to match the deployed domain.
+Any Next.js host works (Vercel, etc.). No environment variables are required
+to deploy; set `NOMINATIM_BASE_URL` / `OSRM_BASE_URL` / `NOMINATIM_USER_AGENT`
+if self-hosting either service.

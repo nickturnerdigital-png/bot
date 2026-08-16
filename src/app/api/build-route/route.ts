@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fetchDistanceMatrix, geocodeAddress } from "@/lib/googleMaps";
 import { buildAppleMapsUrl, buildGoogleMapsUrls } from "@/lib/mapsUrl";
+import { geocodeAddress } from "@/lib/nominatim";
+import { fetchDistanceMatrix, fetchRouteGeometry } from "@/lib/osrm";
 import { buildOptimalOrder } from "@/lib/routing";
 import { todayDateString } from "@/lib/time";
 import type { RouteResult, RouteStopResult, Stop } from "@/lib/types";
@@ -79,6 +80,7 @@ export async function POST(req: NextRequest) {
         builtAt,
         mapsUrls: [],
         appleMapsUrl: "",
+        routeGeometry: [],
       };
       return NextResponse.json(emptyResult);
     }
@@ -111,6 +113,8 @@ export async function POST(req: NextRequest) {
       })),
     ];
 
+    const routeGeometry = await fetchRouteGeometry(routePoints).catch(() => []);
+
     const result: RouteResult = {
       id: crypto.randomUUID(),
       date: todayDateString(),
@@ -128,6 +132,7 @@ export async function POST(req: NextRequest) {
       builtAt,
       mapsUrls: buildGoogleMapsUrls(routePoints),
       appleMapsUrl: buildAppleMapsUrl(routePoints),
+      routeGeometry,
     };
 
     return NextResponse.json(result);

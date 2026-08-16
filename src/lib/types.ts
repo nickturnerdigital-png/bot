@@ -59,6 +59,8 @@ export interface RouteResult {
   builtAt: string;
   mapsUrls: string[]; // one or more legs, chunked to respect Google Maps waypoint limits
   appleMapsUrl: string; // best-effort, first-to-last leg only (see lib/mapsUrl.ts)
+  /** [lat, lng] points tracing the driving route in visit order, for map display. Empty if unavailable. */
+  routeGeometry: [number, number][];
 }
 
 export interface LatLng {

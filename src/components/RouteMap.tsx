@@ -1,13 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { loadGoogleMapsScript } from "@/lib/loadGoogleMaps";
+import "leaflet/dist/leaflet.css";
+import type { Map as LeafletMap } from "leaflet";
+import { useEffect, useRef } from "react";
 import { usePlannerStore } from "@/lib/store";
 import type { Stop } from "@/lib/types";
-
-const BROWSER_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_KEY;
-// Directions API (JS client) allows up to 25 total points (origin + up to 23 waypoints + destination).
-const MAX_JS_WAYPOINTS = 23;
 
 const STATUS_COLOR: Record<Stop["status"], string> = {
   pending: "#6b7280",
@@ -17,100 +14,81 @@ const STATUS_COLOR: Record<Stop["status"], string> = {
   done: "#6b7280",
 };
 
+/** Tooltip content built as a DOM node (not an HTML string) so user-entered labels/addresses can't inject markup. */
+function textTooltip(text: string): HTMLSpanElement {
+  const el = document.createElement("span");
+  el.textContent = text;
+  return el;
+}
+
 export function RouteMap() {
   const route = usePlannerStore((s) => s.route);
   const stops = usePlannerStore((s) => s.stops);
-  const mapDivRef = useRef<HTMLDivElement>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [ready, setReady] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<LeafletMap | null>(null);
 
   useEffect(() => {
-    if (!BROWSER_KEY) return;
-    loadGoogleMapsScript(BROWSER_KEY)
-      .then(() => setReady(true))
-      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load map"));
-  }, []);
-
-  useEffect(() => {
-    if (!ready || !route || !mapDivRef.current) return;
+    if (!route || !containerRef.current) return;
     if (route.startLat == null || route.startLng == null) return;
 
-    const startPosition = { lat: route.startLat, lng: route.startLng };
-    const map = new google.maps.Map(mapDivRef.current, {
-      center: startPosition,
-      zoom: 11,
-      disableDefaultUI: true,
-      zoomControl: true,
-    });
+    const startLat = route.startLat;
+    const startLng = route.startLng;
+    let cancelled = false;
 
-    const stopById = new Map(stops.map((s) => [s.id, s]));
-    const orderedStops = route.orderedStopIds
-      .map((id) => stopById.get(id))
-      .filter((s): s is Stop => !!s && s.lat != null && s.lng != null);
+    (async () => {
+      const L = (await import("leaflet")).default;
+      if (cancelled || !containerRef.current) return;
 
-    new google.maps.Marker({
-      position: startPosition,
-      map,
-      label: "S",
-      title: "Start",
-    });
+      mapRef.current?.remove();
+      const map = L.map(containerRef.current).setView([startLat, startLng], 11);
+      mapRef.current = map;
 
-    orderedStops.forEach((stop, i) => {
-      new google.maps.Marker({
-        position: { lat: stop.lat as number, lng: stop.lng as number },
-        map,
-        label: { text: String(i + 1), color: "#fff" },
-        title: stop.label || stop.address,
-        icon: {
-          path: google.maps.SymbolPath.CIRCLE,
-          fillColor: STATUS_COLOR[stop.status],
-          fillOpacity: 1,
-          strokeWeight: 1,
-          strokeColor: "#fff",
-          scale: 14,
-        },
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        maxZoom: 19,
+      }).addTo(map);
+
+      const bounds = L.latLngBounds([[startLat, startLng]]);
+
+      function numberedIcon(label: string, color: string) {
+        return L.divIcon({
+          className: "",
+          html: `<div style="background:${color};color:#fff;border:2px solid #fff;border-radius:9999px;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;box-shadow:0 1px 3px rgba(0,0,0,.4)">${label}</div>`,
+          iconSize: [28, 28],
+          iconAnchor: [14, 14],
+        });
+      }
+
+      L.marker([startLat, startLng], { icon: numberedIcon("S", "#111827") })
+        .addTo(map)
+        .bindTooltip(textTooltip("Start"));
+
+      const stopById = new Map(stops.map((s) => [s.id, s]));
+      route.orderedStopIds.forEach((id, i) => {
+        const stop = stopById.get(id);
+        if (!stop || stop.lat == null || stop.lng == null) return;
+        L.marker([stop.lat, stop.lng], { icon: numberedIcon(String(i + 1), STATUS_COLOR[stop.status]) })
+          .addTo(map)
+          .bindTooltip(textTooltip(stop.label || stop.address));
+        bounds.extend([stop.lat, stop.lng]);
       });
-    });
 
-    const bounds = new google.maps.LatLngBounds();
-    bounds.extend(startPosition);
-    orderedStops.forEach((s) => bounds.extend({ lat: s.lat as number, lng: s.lng as number }));
+      if (route.routeGeometry.length > 1) {
+        L.polyline(route.routeGeometry, { color: "#2563eb", weight: 4, opacity: 0.8 }).addTo(map);
+        route.routeGeometry.forEach((p) => bounds.extend(p));
+      }
 
-    if (orderedStops.length > 0 && orderedStops.length <= MAX_JS_WAYPOINTS) {
-      const directionsService = new google.maps.DirectionsService();
-      const directionsRenderer = new google.maps.DirectionsRenderer({ suppressMarkers: true, map });
-      const last = orderedStops[orderedStops.length - 1]!;
-      const waypoints = orderedStops.slice(0, -1).map((s) => ({
-        location: { lat: s.lat as number, lng: s.lng as number },
-        stopover: true,
-      }));
+      map.fitBounds(bounds, { padding: [24, 24] });
+    })();
 
-      directionsService.route(
-        {
-          origin: startPosition,
-          destination: { lat: last.lat as number, lng: last.lng as number },
-          waypoints,
-          optimizeWaypoints: false,
-          travelMode: google.maps.TravelMode.DRIVING,
-        },
-        (result, status) => {
-          if (status === google.maps.DirectionsStatus.OK && result) {
-            directionsRenderer.setDirections(result);
-          } else {
-            map.fitBounds(bounds);
-          }
-        }
-      );
-    } else {
-      map.fitBounds(bounds);
-    }
-  }, [ready, route, stops]);
+    return () => {
+      cancelled = true;
+      mapRef.current?.remove();
+      mapRef.current = null;
+    };
+  }, [route, stops]);
 
-  if (!BROWSER_KEY || !route) return null;
+  if (!route) return null;
 
-  if (error) {
-    return <p className="rounded-2xl bg-white p-4 text-sm text-risk-missed shadow-sm">{error}</p>;
-  }
-
-  return <div ref={mapDivRef} className="h-72 w-full overflow-hidden rounded-2xl shadow-sm" />;
+  return <div ref={containerRef} className="h-72 w-full overflow-hidden rounded-2xl shadow-sm" />;
 }

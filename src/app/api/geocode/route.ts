@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { geocodeAddress } from "@/lib/googleMaps";
+import { geocodeAddress } from "@/lib/nominatim";
 
 export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => null);
